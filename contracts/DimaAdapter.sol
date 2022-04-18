@@ -5,6 +5,7 @@ import "./uniswapV2/IUniswapV2Factory.sol";
 import "./uniswapV2/IUniswapV2Router02.sol";
 import "./uniswapV2/IUniswapV2Pair.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "hardhat/console.sol"; //TODO
 
 contract DimaAdapter {
     IUniswapV2Factory public mFactory;
@@ -64,18 +65,19 @@ contract DimaAdapter {
         );
     }
 
-    function removeLiquidity(
-        address iTokenA,
-        address iTokenB,
-        uint256 iLiquidity
-    ) external returns (uint256 amountA, uint256 amountB) {
-        address pair = mFactory.getPair(iTokenA, iTokenB);
-        IERC20(pair).safeTransferFrom(msg.sender, address(this), iLiquidity);
-        IERC20(pair).safeApprove(address(mRouter), iLiquidity);
+    function removeLiquidity(address pairAddress, uint256 iLiquidity)
+        external
+        returns (uint256 amountA, uint256 amountB)
+    {
+        IERC20 LPToken = IERC20(pairAddress);
+        LPToken.safeTransferFrom(msg.sender, address(this), iLiquidity);
+        LPToken.safeApprove(address(mRouter), iLiquidity);
+
+        IUniswapV2Pair pair = IUniswapV2Pair(pairAddress);
 
         (amountA, amountB) = mRouter.removeLiquidity(
-            iTokenA,
-            iTokenB,
+            pair.token0(),
+            pair.token1(),
             iLiquidity,
             1,
             1,
@@ -87,51 +89,117 @@ contract DimaAdapter {
     // calculate price based on pair reserves
     function getTokenPrice(
         address pairAddress,
-        address buyTokenAddress,
-        uint256 buyAmount
-    ) public view returns (uint256) {
+        address sellToken,
+        uint256 sellAmount
+    ) public view returns (uint256 buyAmount) {
         IUniswapV2Pair pair = IUniswapV2Pair(pairAddress);
-        address token0Addr = pair.token0();
-        address token1Addr = pair.token1();
         require(
-            token0Addr == buyTokenAddress || token1Addr == buyTokenAddress,
-            "Wrong token address"
+            pair.token0() == sellToken || pair.token1() == sellToken,
+            "Wrong sell token address"
         );
 
         (uint256 reserves0, uint256 reserves1, ) = pair.getReserves();
 
-        // decimals
-        //uint256 res0 = reserves0 * (10**token1.decimals); TODO
-        if (buyTokenAddress == token0Addr) {
-            return ((buyAmount * reserves1) / reserves0);
+        uint256 reserveIn;
+        uint256 reserveOut;
+
+        if (sellToken == pair.token0()) {
+            reserveIn = reserves0;
+            reserveOut = reserves1;
         } else {
-            return ((buyAmount * reserves0) / reserves1);
+            reserveIn = reserves1;
+            reserveOut = reserves0;
         }
+
+        buyAmount = mRouter.getAmountOut(sellAmount, reserveIn, reserveOut);
     }
 
-    // function pairInfo(address tokenA, address tokenB)
-    //     internal
-    //     view
-    //     returns (
-    //         uint256 reserveA,
-    //         uint256 reserveB,
-    //         uint256 totalSupply
-    //     )
-    // {
-    //     IUniswapV2Pair pair = IUniswapV2Pair(
-    //         UniswapV2Library.pairFor(factory, tokenA, tokenB)
-    //     );
-    //     totalSupply = pair.totalSupply();
-    //     (uint256 reserves0, uint256 reserves1, ) = pair.getReserves();
-    //     (reserveA, reserveB) = tokenA == pair.token0()
-    //         ? (reserves0, reserves1)
-    //         : (reserves1, reserves0);
-    // }
+    function getPathPrice(address[] calldata path, uint256 sellAmount)
+        public
+        view
+        returns (uint256 buyAmount)
+    {
+        uint256[] memory routerAmounts = mRouter.getAmountsOut(
+            sellAmount,
+            path
+        );
+        buyAmount = routerAmounts[routerAmounts.length - 1];
+    }
+
+    function swapToken(
+        address pairAddress,
+        address sellToken,
+        uint256 sellAmount,
+        uint256 buyAmountMin
+    ) external returns (uint256[] memory amounts) {
+        IUniswapV2Pair pair = IUniswapV2Pair(pairAddress);
+        require(
+            pair.token0() == sellToken || pair.token1() == sellToken,
+            "Wrong sell token address"
+        );
+
+        address buyToken;
+        if (sellToken == pair.token0()) {
+            buyToken = pair.token1();
+        } else {
+            buyToken = pair.token0();
+        }
+
+        IERC20(sellToken).safeTransferFrom(
+            msg.sender,
+            address(this),
+            sellAmount
+        );
+        IERC20(sellToken).safeApprove(address(mRouter), sellAmount);
+
+        address[] memory path = new address[](2);
+        path[0] = sellToken;
+        path[1] = buyToken;
+
+        amounts = mRouter.swapExactTokensForTokens(
+            sellAmount,
+            buyAmountMin,
+            path,
+            msg.sender,
+            block.timestamp
+        );
+    }
+
+    function swapWithPath(
+        address[] calldata path,
+        uint256 sellAmount,
+        uint256 buyAmountMin
+    ) external returns (uint256 buyAmount) {
+        address sellToken = path[0];
+
+        IERC20(sellToken).safeTransferFrom(
+            msg.sender,
+            address(this),
+            sellAmount
+        );
+        IERC20(sellToken).safeApprove(address(mRouter), sellAmount);
+
+        uint256[] memory routerAmounts = mRouter.swapExactTokensForTokens(
+            sellAmount,
+            buyAmountMin,
+            path,
+            msg.sender,
+            block.timestamp
+        );
+
+        buyAmount = routerAmounts[routerAmounts.length - 1];
+    }
+
+    function getReserves(address pairAddress)
+        external
+        view
+        returns (uint112 reserve0, uint112 reserve1)
+    {
+        IUniswapV2Pair pair = IUniswapV2Pair(pairAddress);
+        uint32 dummy;
+        (reserve0, reserve1, dummy) = pair.getReserves();
+    }
 }
 
-// Требования к контракту:
-// -Создать через адаптер несколько пар (TST/ACDM, ACDM/POP, ETH/POP)
-// -Добавить/удалить ликвидность к этим парам через адаптер.
-// -Получить цену пары через адаптер
-// -Обменять пару через адаптер
-// -Обменять пару TST/POP используя путь - нет прямого пула - функция ~getpath
+// -Обменять пару TST/POP используя путь - нет прямого пула
+//TODO WETH
