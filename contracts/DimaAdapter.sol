@@ -4,8 +4,8 @@ pragma solidity ^0.8.11;
 import "./uniswapV2/IUniswapV2Factory.sol";
 import "./uniswapV2/IUniswapV2Router02.sol";
 import "./uniswapV2/IUniswapV2Pair.sol";
+import "./uniswapV2/IWETH.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "hardhat/console.sol"; //TODO
 
 contract DimaAdapter {
     IUniswapV2Factory public mFactory;
@@ -32,6 +32,15 @@ contract DimaAdapter {
         pair = mFactory.getPair(tokenA, tokenB);
     }
 
+    //for addLiquidity, addLiquidityETH
+    function _tokenTransferAprove(address iToken, uint256 iAmountToken)
+        internal
+    {
+        IERC20 token = IERC20(iToken);
+        token.safeTransferFrom(msg.sender, address(this), iAmountToken);
+        token.safeApprove(address(mRouter), iAmountToken);
+    }
+
     function addLiquidity(
         address iTokenA,
         address iTokenB,
@@ -45,13 +54,8 @@ contract DimaAdapter {
             uint256 liquidity
         )
     {
-        IERC20 tokenA = IERC20(iTokenA);
-        IERC20 tokenB = IERC20(iTokenB);
-        tokenA.safeTransferFrom(msg.sender, address(this), iAmountA);
-        tokenB.safeTransferFrom(msg.sender, address(this), iAmountB);
-
-        tokenA.safeApprove(address(mRouter), iAmountA);
-        tokenB.safeApprove(address(mRouter), iAmountB);
+        _tokenTransferAprove(iTokenA, iAmountA);
+        _tokenTransferAprove(iTokenB, iAmountB);
 
         (amountA, amountB, liquidity) = mRouter.addLiquidity(
             iTokenA,
@@ -65,19 +69,60 @@ contract DimaAdapter {
         );
     }
 
+    //ETH
+    function addLiquidityETH(address iToken, uint256 iAmountToken)
+        external
+        payable
+        returns (
+            uint256 amountToken,
+            uint256 amountETH,
+            uint256 liquidity
+        )
+    {
+        _tokenTransferAprove(iToken, iAmountToken);
+
+        (amountToken, amountETH, liquidity) = mRouter.addLiquidityETH{
+            value: msg.value
+        }(iToken, iAmountToken, 1, 1, msg.sender, block.timestamp);
+    }
+
     function removeLiquidity(address pairAddress, uint256 iLiquidity)
         external
         returns (uint256 amountA, uint256 amountB)
     {
-        IERC20 LPToken = IERC20(pairAddress);
-        LPToken.safeTransferFrom(msg.sender, address(this), iLiquidity);
-        LPToken.safeApprove(address(mRouter), iLiquidity);
+        _tokenTransferAprove(pairAddress, iLiquidity);
 
         IUniswapV2Pair pair = IUniswapV2Pair(pairAddress);
 
         (amountA, amountB) = mRouter.removeLiquidity(
             pair.token0(),
             pair.token1(),
+            iLiquidity,
+            1,
+            1,
+            msg.sender,
+            block.timestamp
+        );
+    }
+
+    //ETH
+    function removeLiquidityETH(address pairAddress, uint256 iLiquidity)
+        external
+        returns (uint256 amountToken, uint256 amountETH)
+    {
+        _tokenTransferAprove(pairAddress, iLiquidity);
+
+        IUniswapV2Pair pair = IUniswapV2Pair(pairAddress);
+
+        address token;
+        if (pair.token0() == mRouter.WETH()) {
+            token = pair.token1();
+        } else {
+            token = pair.token0();
+        }
+
+        (amountToken, amountETH) = mRouter.removeLiquidityETH(
+            token,
             iLiquidity,
             1,
             1,
@@ -199,7 +244,9 @@ contract DimaAdapter {
         uint32 dummy;
         (reserve0, reserve1, dummy) = pair.getReserves();
     }
-}
 
-// -Обменять пару TST/POP используя путь - нет прямого пула
-//TODO WETH
+    // function buyWETH() public payable {
+    //     IWETH weth = IWETH(mRouter.WETH());
+    //     weth.deposit{value: msg.value}();
+    // }
+}
